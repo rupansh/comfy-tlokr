@@ -220,16 +220,16 @@ def _model_key_map(model: Any) -> dict[str, str]:
     """
     mapping: dict[str, str] = {}
 
-    def add(unet_name: str, module_path: str) -> None:
+    def add(unet_name: str, module_path: str, object_root: str = "diffusion_model") -> None:
         if not unet_name.startswith("blocks."):
             return
         kohya_name = f"lora_unet_{unet_name.replace('.', '_')}"
-        mapping[kohya_name] = f"diffusion_model.{module_path}.weight"
+        mapping[kohya_name] = f"{object_root}.{module_path}.weight"
         # The trainer's Anima implementation calls this projection
         # ``output_proj``.  Some ComfyUI Anima revisions call it ``o_proj``.
         if unet_name.endswith(".o_proj"):
             mapping[kohya_name.removesuffix("_o_proj") + "_output_proj"] = (
-                f"diffusion_model.{module_path}.weight"
+                f"{object_root}.{module_path}.weight"
             )
 
     diffusion_model = getattr(getattr(model, "model", None), "diffusion_model", None)
@@ -247,7 +247,7 @@ def _model_key_map(model: Any) -> dict[str, str]:
                 if state_key.startswith(root):
                     unet_name = state_key[len(root) : -len(".weight")]
                     if unet_name.startswith("blocks."):
-                        add(unet_name, unet_name)
+                        add(unet_name, unet_name, root.removesuffix("."))
                     break
     return mapping
 
