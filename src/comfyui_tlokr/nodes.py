@@ -210,13 +210,45 @@ class TLoKrLinear(nn.Module):
 
 
 def _model_key_map(model: Any) -> dict[str, str]:
-    """Map the trainer's Kohya keys to the exact Comfy model state-dict paths."""
+    """Map trainer Kohya keys to exact paths in the live Comfy model.
+
+    Comfy's ``ModelPatcher`` normally exposes ``diffusion_model.*`` in its
+    state dict, but wrappers and quantized loaders can change that serialized
+    prefix (or omit lazy weights entirely).  The module tree is the authority
+    for object patches, so prefer it and retain a state-dict fallback for
+    unusual model wrappers.
+    """
     mapping: dict[str, str] = {}
-    for state_key in model.model.state_dict().keys():
-        if not state_key.startswith("diffusion_model.") or not state_key.endswith(".weight"):
-            continue
-        unet_name = state_key[len("diffusion_model.") : -len(".weight")]
-        mapping[f"lora_unet_{unet_name.replace('.', '_')}"] = state_key
+
+    def add(unet_name: str, module_path: str) -> None:
+        if not unet_name.startswith("blocks."):
+            return
+        kohya_name = f"lora_unet_{unet_name.replace('.', '_')}"
+        mapping[kohya_name] = f"diffusion_model.{module_path}.weight"
+        # The trainer's Anima implementation calls this projection
+        # ``output_proj``.  Some ComfyUI Anima revisions call it ``o_proj``.
+        if unet_name.endswith(".o_proj"):
+            mapping[kohya_name.removesuffix("_o_proj") + "_output_proj"] = (
+                f"diffusion_model.{module_path}.weight"
+            )
+
+    diffusion_model = getattr(getattr(model, "model", None), "diffusion_model", None)
+    if diffusion_model is not None:
+        for module_path, module in diffusion_model.named_modules():
+            if module_path.startswith("blocks.") and isinstance(module, nn.Linear):
+                add(module_path, module_path)
+
+    # Fallback for wrappers that do not expose the diffusion module directly.
+    if not mapping:
+        for state_key in model.model.state_dict().keys():
+            if not state_key.endswith(".weight"):
+                continue
+            for root in ("diffusion_model.", "model.diffusion_model."):
+                if state_key.startswith(root):
+                    unet_name = state_key[len(root) : -len(".weight")]
+                    if unet_name.startswith("blocks."):
+                        add(unet_name, unet_name)
+                    break
     return mapping
 
 

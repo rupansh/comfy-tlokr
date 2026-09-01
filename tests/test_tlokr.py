@@ -16,6 +16,7 @@ from comfyui_tlokr.nodes import (  # noqa: E402
     TLoKrLinear,
     TLoKrLoaderWithClip,
     _TIMESTEPS,
+    _model_key_map,
     active_rank,
     apply_tlokr,
     parse_tlokr_state,
@@ -118,3 +119,34 @@ class TLoKrTests(unittest.TestCase):
         )
         self.assertTrue(patched.model_options["_comfyui_tlokr_timestep_wrapper"])
         self.assertGreater(patched.size, original.model_size())
+
+    def test_model_key_map_uses_live_modules_and_comfy_output_alias(self):
+        class Attention(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.o_proj = nn.Linear(4, 4, bias=False)
+
+        class DiffusionModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.blocks = nn.ModuleList([nn.Module()])
+                self.blocks[0].cross_attn = Attention()
+
+        class Model(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.diffusion_model = DiffusionModel()
+
+        class Patcher:
+            def __init__(self):
+                self.model = Model()
+
+        mapping = _model_key_map(Patcher())
+        self.assertEqual(
+            mapping["lora_unet_blocks_0_cross_attn_o_proj"],
+            "diffusion_model.blocks.0.cross_attn.o_proj.weight",
+        )
+        self.assertEqual(
+            mapping["lora_unet_blocks_0_cross_attn_output_proj"],
+            "diffusion_model.blocks.0.cross_attn.o_proj.weight",
+        )
