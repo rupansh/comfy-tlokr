@@ -281,6 +281,11 @@ class TLoKrLinear:
         # subclass, so ComfyUI's own cast/quantized forward path is preserved.
         output = super().forward(x)
         for adapter in self.adapters:
+            # Object patches can be installed after the base model has
+            # already been moved to CUDA (and low-VRAM paths may move it back
+            # to CPU).  Keep the non-persistent factor buffers aligned with
+            # the activation device/dtype lazily, once per transition.
+            adapter.to(device=x.device, dtype=x.dtype)
             output = output + adapter.delta(x, timesteps).to(dtype=output.dtype)
         return output
 
