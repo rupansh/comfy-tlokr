@@ -180,33 +180,120 @@ class _TLoKrAdapter(nn.Module):
         return out.reshape(*x.shape[:-1], -1) * self.scale
 
 
-class TLoKrLinear(nn.Module):
-    """An nn.Linear-compatible wrapper that leaves the base layer untouched."""
+class TLoKrLinear:
+    """Mixin used by a patch-compatible, timestep-aware Linear wrapper.
+
+    The wrapper deliberately inherits the *same concrete Linear class* as the
+    target module.  In particular, ComfyUI's ModelPatcher applies ordinary
+    LoRA patches to a module's ``weight`` path.  An earlier implementation
+    registered the original Linear below ``base``, changing that path to
+    ``...q_proj.base.weight`` and causing ordinary LoRAs to be silently
+    skipped whenever a T-LoKr was present.  Keeping ``weight`` and ``bias``
+    directly on this object preserves ComfyUI's patch contract while the
+    inherited Linear ``forward`` retains custom casting/quantization behavior.
+    """
 
     def __init__(self, base: nn.Module, adapters: tuple[_TLoKrAdapter, ...]):
-        super().__init__()
         if not isinstance(base, nn.Linear):
             raise TLoKrFormatError(
                 f"T-LoKr supports Linear targets only; got {type(base).__module__}.{type(base).__name__}"
             )
-        self.base = base
+        # Dynamic subclasses still use nn.Module's parameter registries, but
+        # the original module is kept as a non-child reference for shape and
+        # compatibility checks.  It must not be registered below ``base``.
+        nn.Module.__init__(self)
+        source = base.base if isinstance(base, TLoKrLinear) else base
+        for key, value in base.__dict__.items():
+            if key in {
+                "training",
+                "_parameters",
+                "_buffers",
+                "_non_persistent_buffers_set",
+                "_backward_hooks",
+                "_is_full_backward_hook",
+                "_forward_hooks",
+                "_forward_hooks_with_kwargs",
+                "_forward_hooks_always_called",
+                "_forward_pre_hooks",
+                "_forward_pre_hooks_with_kwargs",
+                "_state_dict_hooks",
+                "_state_dict_pre_hooks",
+                "_load_state_dict_pre_hooks",
+                "_load_state_dict_post_hooks",
+                "_modules",
+                "weight",
+                "bias",
+                "comfy_patched_weights",
+                "prev_comfy_cast_weights",
+            } or key.startswith("_tlokr_"):
+                continue
+            # Keep concrete Linear/Comfy attributes (in_features,
+            # weight_function, dtype/cast flags, etc.) visible to inherited
+            # forward methods.  Private nn.Module internals were initialized
+            # above and must not be shared with the source module.
+            if key in {"weight_function", "bias_function"}:
+                # These are per-patcher low-VRAM hooks, not Linear
+                # configuration.  Carrying the source list would make a
+                # freshly installed object patch look already loaded.
+                object.__setattr__(self, key, [])
+            elif not key.startswith("_"):
+                object.__setattr__(self, key, value)
+        object.__setattr__(self, "_tlokr_original", source)
+        object.__setattr__(self, "_tlokr_base_type", type(source))
+        self.weight = base.weight
+        self.bias = base.bias
         self.adapters = nn.ModuleList(adapters)
+
+    @property
+    def base(self) -> nn.Module:
+        """Return the original Linear for compatibility with loader checks."""
+        return object.__getattribute__(self, "_tlokr_original")
+
+    def named_parameters(self, prefix: str = "", recurse: bool = True, remove_duplicate: bool = True):
+        """Expose only Linear parameters to ComfyUI's weight patch planner.
+
+        The adapter tensors are registered child buffers so normal ``to()``
+        and serialization traversal still reaches them.  ComfyUI decides
+        whether a module is a patchable leaf by checking whether recursive
+        parameters contain extra child parameters; hiding adapter parameters
+        here keeps this wrapper in the same leaf category as the original
+        Linear, while ordinary LoRA patches continue to target ``weight`` and
+        ``bias`` directly.
+        """
+        return super().named_parameters(prefix=prefix, recurse=False, remove_duplicate=remove_duplicate)
 
     @classmethod
     def with_adapter(cls, base: nn.Module, weights: TLoKrWeights, strength: float) -> "TLoKrLinear":
         adapter = _TLoKrAdapter(weights, strength)
-        if isinstance(base, cls):
-            return cls(base.base, tuple(base.adapters) + (adapter,))
-        return cls(base, (adapter,))
+        if isinstance(base, TLoKrLinear):
+            adapters = tuple(base.adapters) + (adapter,)
+            wrapper_type = type(base)
+        else:
+            adapters = (adapter,)
+            wrapper_type = _tlokr_wrapper_type(type(base))
+        return wrapper_type(base, adapters)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         timesteps = _TIMESTEPS.get()
         if timesteps is None:
             raise RuntimeError("T-LoKr has no denoiser timestep context; use the T-LoKr Loader node")
-        output = self.base(x)
+        # ``super()`` resolves to the concrete Linear class in the dynamic
+        # subclass, so ComfyUI's own cast/quantized forward path is preserved.
+        output = super().forward(x)
         for adapter in self.adapters:
             output = output + adapter.delta(x, timesteps).to(dtype=output.dtype)
         return output
+
+
+_TLOKR_WRAPPER_TYPES: dict[type[nn.Module], type[TLoKrLinear]] = {}
+
+
+def _tlokr_wrapper_type(base_type: type[nn.Module]) -> type[TLoKrLinear]:
+    wrapper_type = _TLOKR_WRAPPER_TYPES.get(base_type)
+    if wrapper_type is None:
+        wrapper_type = type(f"TLoKr{base_type.__name__}", (TLoKrLinear, base_type), {})
+        _TLOKR_WRAPPER_TYPES[base_type] = wrapper_type
+    return wrapper_type
 
 
 def _model_key_map(model: Any) -> dict[str, str]:

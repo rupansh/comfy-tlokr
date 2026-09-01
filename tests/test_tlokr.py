@@ -59,6 +59,22 @@ class TLoKrTests(unittest.TestCase):
         self.assertEqual(tuple(out.shape), (2, 1, 4))
         self.assertFalse(torch.equal(out[0], out[1]))
 
+    def test_tlokr_linear_keeps_comfy_weight_patch_path(self):
+        metadata = {"anima_adapter_type": "tlokr", "anima_adapter_format": "1"}
+        weights = next(iter(parse_tlokr_state(_state(), metadata).values()))
+        base = nn.Linear(4, 4, bias=False)
+        layer = TLoKrLinear.with_adapter(base, weights, 0.5)
+
+        # ComfyUI's ModelPatcher must still see the original leaf parameter
+        # path so a normal LoRA can be composed before or after T-LoKr.
+        self.assertTrue(isinstance(layer, nn.Linear))
+        self.assertIn("weight", dict(layer.named_parameters(recurse=False)))
+        self.assertEqual(
+            list(dict(layer.named_parameters(recurse=True))),
+            ["weight"],
+        )
+        self.assertNotIn("base", dict(layer.named_modules()))
+
     def test_parser_rejects_non_tlokr_metadata(self):
         with self.assertRaisesRegex(TLoKrFormatError, "anima_adapter_type"):
             parse_tlokr_state(_state(), {})
