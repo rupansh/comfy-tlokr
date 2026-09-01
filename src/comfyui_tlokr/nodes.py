@@ -318,5 +318,53 @@ class TLoKrLoader:
         return (patched,)
 
 
+class TLoKrLoaderWithClip:
+    """Apply T-LoKr to MODEL while passing the existing CLIP through unchanged.
+
+    SwarmUI's normal LoRA selector emits a two-output ``LoraLoader`` node. The
+    extension rewrites T-LoKr entries to this node so model and text-encoder
+    links remain valid when ordinary LoRAs and T-LoKr adapters are mixed.
+    """
+
+    CATEGORY = "loaders/adapters"
+    RETURN_TYPES = ("MODEL", "CLIP")
+    FUNCTION = "load_tlokr"
+    DESCRIPTION = (
+        "Applies an Anima trainer T-LoKr adapter to MODEL and passes CLIP through unchanged."
+    )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        names = folder_paths.get_filename_list("loras") if folder_paths is not None else []
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "clip": ("CLIP",),
+                "tlokr_name": (
+                    names,
+                    {"tooltip": "T-LoKr v1 safetensor stored in ComfyUI/models/loras."},
+                ),
+                "strength_model": (
+                    "FLOAT",
+                    {"default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01},
+                ),
+            }
+        }
+
+    def load_tlokr(self, model: Any, clip: Any, tlokr_name: str, strength_model: float):
+        if strength_model == 0:
+            return (model, clip)
+        if folder_paths is None:  # pragma: no cover - protects accidental standalone use.
+            raise RuntimeError("T-LoKr Loader must run inside ComfyUI")
+        path = folder_paths.get_full_path_or_raise("loras", tlokr_name)
+        adapters = load_tlokr(path)
+        patched, _ = apply_tlokr(model, adapters, strength_model)
+        return (patched, clip)
+
+
 NODE_CLASS_MAPPINGS = {"TLoKrLoader": TLoKrLoader}
-NODE_DISPLAY_NAME_MAPPINGS = {"TLoKrLoader": "T-LoKr Loader (Anima)"}
+NODE_CLASS_MAPPINGS["TLoKrLoaderWithClip"] = TLoKrLoaderWithClip
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "TLoKrLoader": "T-LoKr Loader (Anima)",
+    "TLoKrLoaderWithClip": "T-LoKr Loader (Anima, CLIP passthrough)",
+}

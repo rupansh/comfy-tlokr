@@ -6,11 +6,12 @@ the T-LoKr v1 safetensors written by
 the defining behavior that the ordinary LoKr loader cannot: the `W2=A@B`
 factorization and the active-rank prefix selected at each flow timestep.
 
-The included `swarmui_extension/TLoKrExtension` adds a matching **T-LoKr
-(Anima)** group to SwarmUI's Advanced Options and generates the loader node
-between the base model and sampler. It registers this repository as SwarmUI's
-`AutoInstall` feature, so self-start ComfyUI backends clone/update the node and
-install `requirements.txt` automatically.
+The included `swarmui_extension/TLoKrExtension` integrates with SwarmUI's
+existing **LoRA** selector. T-LoKr entries are identified from their safetensor
+metadata and routed to the timestep-aware loader; ordinary LoRAs continue using
+SwarmUI's normal loader. It registers this repository as SwarmUI's `AutoInstall`
+feature, so self-start ComfyUI backends clone/update the node and install
+`requirements.txt` automatically.
 
 The AutoInstall URL is wired to `https://github.com/rupansh/comfy-tlokr`; that
 repository must contain this checkout before a fresh SwarmUI instance can clone
@@ -29,9 +30,10 @@ cp -a swarmui_extension/TLoKrExtension /media/rupansh/wdblack/sd/SwarmUI/src/Ext
 Then rebuild/restart SwarmUI with `launch-linux-dev.sh` (or its normal update
 workflow). On a normal SwarmUI self-start backend, the included extension
 instead clones this repository into its managed `DLNodes/comfy-tlokr` directory
-automatically. Put the adapter in ComfyUI's `models/loras` folder. For the
-supplied example, choose `melted1-tlokr-fp8_e000030.safetensors` and strength
-`1.0`.
+automatically. Put the adapter in ComfyUI's `models/loras` folder, then select
+it from the normal **LoRA** selector. Its LoRA weight is used as the T-LoKr
+strength. For the supplied example, choose
+`melted1-tlokr-fp8_e000030.safetensors` with weight `1.0`.
 
 ## Compatibility contract
 

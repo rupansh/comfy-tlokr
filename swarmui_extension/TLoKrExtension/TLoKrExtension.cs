@@ -6,14 +6,108 @@ using SwarmUI.Utils;
 
 namespace ComfyTLoKr.Swarm;
 
-/// <summary>Adds a T-LoKr selector to SwarmUI's Comfy workflow generator.</summary>
+/// <summary>
+/// Routes T-LoKr entries selected in SwarmUI's normal LoRA selector to the
+/// timestep-aware ComfyUI loader.
+/// </summary>
 public class TLoKrExtension : Extension
 {
-    public static T2IRegisteredParam<string> TLoKr;
+    private static T2IModel FindLoraModel(string configuredName)
+    {
+        if (string.IsNullOrWhiteSpace(configuredName))
+        {
+            return null;
+        }
+        T2IModelHandler handler = Program.T2IModelSets["LoRA"];
+        string normalized = configuredName.Replace('\\', '/');
+        string withoutExtension = normalized.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase)
+            ? normalized[..^".safetensors".Length]
+            : normalized;
+        string[] candidates =
+        [
+            configuredName,
+            normalized,
+            normalized + ".safetensors",
+            withoutExtension,
+            withoutExtension + ".safetensors"
+        ];
+        foreach (string candidate in candidates)
+        {
+            if (handler.Models.TryGetValue(candidate, out T2IModel model))
+            {
+                return model;
+            }
+        }
+        return handler.Models.Values.FirstOrDefault(model =>
+            string.Equals(model.Name.Replace('\\', '/'), normalized, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(model.Name.Replace('\\', '/'), withoutExtension, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(model.Name.Replace('\\', '/'), withoutExtension + ".safetensors", StringComparison.OrdinalIgnoreCase));
+    }
 
-    public static T2IRegisteredParam<double> TLoKrStrength;
+    private static bool IsTLoKr(T2IModel model)
+    {
+        if (model?.RawFilePath is null)
+        {
+            return false;
+        }
+        try
+        {
+            JObject header = T2IModel.GetMetadataHeaderFrom(model.RawFilePath);
+            JObject metadata = header?["__metadata__"] as JObject;
+            return string.Equals(metadata?.Value<string>("anima_adapter_type"), "tlokr", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex)
+        {
+            Logs.Debug($"Unable to inspect LoRA metadata for '{model.Name}': {ex.Message}");
+            return false;
+        }
+    }
 
-    public static T2IParamGroup TLoKrGroup;
+    private static void RouteTLoKrLoras(WorkflowGenerator g)
+    {
+        foreach (JProperty property in g.Workflow.Properties().ToList())
+        {
+            if (property.Value is not JObject node)
+            {
+                continue;
+            }
+            string classType = node.Value<string>("class_type");
+            bool hasClip = classType == "LoraLoader";
+            if (!hasClip && classType != "LoraLoaderModelOnly")
+            {
+                continue;
+            }
+            if (node["inputs"] is not JObject inputs)
+            {
+                continue;
+            }
+            string configuredName = inputs.Value<string>("lora_name");
+            T2IModel lora = FindLoraModel(configuredName);
+            if (!IsTLoKr(lora))
+            {
+                continue;
+            }
+            if (!g.Features.Contains("tlokr"))
+            {
+                throw new SwarmUserErrorException(
+                    "A T-LoKr adapter was selected in the LoRA list, but the ComfyUI T-LoKr node is not installed.");
+            }
+
+            // Preserve the node's position and IDs so mixed ordinary LoRAs and
+            // T-LoKr adapters retain exactly the order selected by the user.
+            inputs["tlokr_name"] = inputs["lora_name"];
+            inputs.Remove("lora_name");
+            if (hasClip)
+            {
+                inputs.Remove("strength_clip");
+                node["class_type"] = "TLoKrLoaderWithClip";
+            }
+            else
+            {
+                node["class_type"] = "TLoKrLoader";
+            }
+        }
+    }
 
     public override void OnInit()
     {
@@ -27,57 +121,11 @@ public class TLoKrExtension : Extension
             "Installs the ComfyUI T-LoKr loader for Anima adapters from rupansh/comfy-tlokr.",
             AutoInstall: true
         ));
-        // ComfyUI marks the capability available only after it sees the node.
         ComfyUIBackendExtension.NodeToFeatureMap["TLoKrLoader"] = "tlokr";
-        TLoKrGroup = new("T-LoKr (Anima)", Toggles: true, Open: false, IsAdvanced: true);
-        TLoKr = T2IParamTypes.Register<string>(new(
-            "T-LoKr Adapter",
-            "[T-LoKr]\nA T-LoKr v1 safetensor in the ComfyUI LoRA model folder. " +
-            "It must match the selected Anima DiT base model.",
-            "",
-            IgnoreIf: "",
-            GetValues: session => Program.T2IModelSets["LoRA"].ListModelNamesFor(session),
-            Group: TLoKrGroup,
-            FeatureFlag: "tlokr",
-            Subtype: "LoRA",
-            OrderPriority: 1
-        ));
-        TLoKrStrength = T2IParamTypes.Register<double>(new(
-            "T-LoKr Strength",
-            "[T-LoKr]\nAdapter multiplier. 1.0 reproduces the trained scale; negative values invert it.",
-            "1",
-            Min: -100,
-            Max: 100,
-            Step: 0.01,
-            Group: TLoKrGroup,
-            FeatureFlag: "tlokr",
-            OrderPriority: 2
-        ));
+        ComfyUIBackendExtension.NodeToFeatureMap["TLoKrLoaderWithClip"] = "tlokr";
 
-        WorkflowGenerator.AddStep(g =>
-        {
-            if (!g.UserInput.TryGet(TLoKr, out string tlokrName) || string.IsNullOrWhiteSpace(tlokrName))
-            {
-                return;
-            }
-            if (!g.Features.Contains("tlokr"))
-            {
-                throw new SwarmUserErrorException("T-LoKr was selected, but the ComfyUI TLoKrLoader node is not installed.");
-            }
-            T2IModelHandler loraHandler = Program.T2IModelSets["LoRA"];
-            if (!loraHandler.Models.TryGetValue(tlokrName + ".safetensors", out T2IModel tlokr)
-                && !loraHandler.Models.TryGetValue(tlokrName, out tlokr))
-            {
-                throw new SwarmUserErrorException($"T-LoKr adapter '{tlokrName}' was not found in the LoRA model folder.");
-            }
-            g.FinalLoadedModelList.Add(tlokr);
-            string node = g.CreateNode("TLoKrLoader", new JObject()
-            {
-                ["model"] = g.CurrentModel.Path,
-                ["tlokr_name"] = tlokr.ToString(g.ModelFolderFormat),
-                ["strength_model"] = g.UserInput.Get(TLoKrStrength, 1.0),
-            });
-            g.CurrentModel = g.CurrentModel.WithPath([node, 0]);
-        }, -5.5);
+        // Core SwarmUI creates standard LoraLoader nodes at -10. Rewrite only
+        // the T-LoKr entries immediately afterward; ordinary LoRAs are kept.
+        WorkflowGenerator.AddModelGenStep(RouteTLoKrLoras, -9.5);
     }
 }

@@ -11,8 +11,10 @@ sys.modules.setdefault("folder_paths", types.SimpleNamespace())
 
 from comfyui_tlokr.nodes import (  # noqa: E402
     FORMAT_VERSION,
+    NODE_CLASS_MAPPINGS,
     TLoKrFormatError,
     TLoKrLinear,
+    TLoKrLoaderWithClip,
     _TIMESTEPS,
     active_rank,
     apply_tlokr,
@@ -32,6 +34,10 @@ def _state() -> dict[str, torch.Tensor]:
 
 
 class TLoKrTests(unittest.TestCase):
+    def test_clip_passthrough_loader_is_registered(self):
+        self.assertIs(NODE_CLASS_MAPPINGS["TLoKrLoaderWithClip"], TLoKrLoaderWithClip)
+        self.assertEqual(TLoKrLoaderWithClip.RETURN_TYPES, ("MODEL", "CLIP"))
+
     def test_schedule_matches_trainer_definition(self):
         ranks = active_rank(torch.tensor([1.0, 0.5, 0.0]), max_rank=8, min_rank=2)
         self.assertEqual(ranks.tolist(), [2, 5, 8])
